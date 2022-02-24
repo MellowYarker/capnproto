@@ -36,6 +36,7 @@
 
 #include <kj/string.h>
 #include <kj/vector.h>
+#include <kj/map.h>
 #include <kj/memory.h>
 #include <kj/one-of.h>
 #include <kj/async-io.h>
@@ -299,6 +300,9 @@ public:
   kj::Maybe<kj::StringPtr> get(HttpHeaderId id) const;
   // Read a header.
 
+  kj::Maybe<const kj::Vector<kj::StringPtr>&> getUnindexed(kj::StringPtr id) const;
+  // Read an unindexed header.
+
   template <typename Func>
   void forEach(Func&& func) const;
   // Calls `func(name, value)` for each header in the set -- including headers that aren't mapped
@@ -334,10 +338,8 @@ public:
   //   `takeOwnership()`.
 
   void unset(HttpHeaderId id);
-  // Removes a header.
-  //
-  // It's not possible to remove a header by string name because non-indexed headers would take
-  // O(n) time to remove. Instead, construct a new HttpHeaders object and copy contents.
+  void unset(kj::StringPtr id);
+  // Removes a header, though the method that takes an `HttpHeaderId` only works for indexed headers.
 
   void takeOwnership(kj::String&& string);
   void takeOwnership(kj::Array<char>&& chars);
@@ -442,11 +444,7 @@ private:
   kj::Array<kj::StringPtr> indexedHeaders;
   // Size is always table->idCount().
 
-  struct Header {
-    kj::StringPtr name;
-    kj::StringPtr value;
-  };
-  kj::Vector<Header> unindexedHeaders;
+  kj::HashMap<kj::StringPtr, kj::Vector<kj::StringPtr>> unindexedHeaders;
 
   kj::Vector<kj::Array<char>> ownedStrings;
 
@@ -1121,6 +1119,15 @@ inline void HttpHeaders::unset(HttpHeaderId id) {
   indexedHeaders[id.id] = nullptr;
 }
 
+inline void HttpHeaders::unset(kj::StringPtr id) {
+  KJ_IF_MAYBE(headerId, table->stringToId(id)) {
+    headerId->requireFrom(*table);
+    indexedHeaders[headerId->id] = nullptr;
+  } else {
+    unindexedHeaders.erase(id);
+  }
+}
+
 template <typename Func>
 inline void HttpHeaders::forEach(Func&& func) const {
   for (auto i: kj::indices(indexedHeaders)) {
@@ -1130,7 +1137,9 @@ inline void HttpHeaders::forEach(Func&& func) const {
   }
 
   for (auto& header: unindexedHeaders) {
-    func(header.name, header.value);
+    for (auto& value: header.value) {
+      func(header.key, value);
+    }
   }
 }
 
@@ -1143,7 +1152,9 @@ inline void HttpHeaders::forEach(Func1&& func1, Func2&& func2) const {
   }
 
   for (auto& header: unindexedHeaders) {
-    func2(header.name, header.value);
+    for (auto& value: header.value) {
+      func2(header.key, value);
+    }
   }
 }
 

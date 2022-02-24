@@ -611,10 +611,17 @@ HttpHeaders HttpHeaders::clone() const {
     }
   }
 
-  result.unindexedHeaders.resize(unindexedHeaders.size());
-  for (auto i: kj::indices(unindexedHeaders)) {
-    result.unindexedHeaders[i].name = result.cloneToOwn(unindexedHeaders[i].name);
-    result.unindexedHeaders[i].value = result.cloneToOwn(unindexedHeaders[i].value);
+  result.unindexedHeaders.reserve(unindexedHeaders.size());
+  for (const auto& header: unindexedHeaders) {
+    auto& entry = result.unindexedHeaders.findOrCreate(header.key, [&]() {
+      return decltype(result.unindexedHeaders)::Entry {
+        .key = result.cloneToOwn(header.key),
+        .value = kj::Vector<kj::StringPtr>(header.value.size())
+      };
+    });
+    for (const auto& value: header.value) {
+      entry.add(result.cloneToOwn(value));
+    }
   }
 
   return result;
@@ -629,9 +636,15 @@ HttpHeaders HttpHeaders::cloneShallow() const {
     }
   }
 
-  result.unindexedHeaders.resize(unindexedHeaders.size());
-  for (auto i: kj::indices(unindexedHeaders)) {
-    result.unindexedHeaders[i] = unindexedHeaders[i];
+  result.unindexedHeaders.reserve(unindexedHeaders.size());
+  for (const auto& header: unindexedHeaders) {
+    auto& entry = result.unindexedHeaders.findOrCreate(header.key, [&]() {
+      return decltype(result.unindexedHeaders)::Entry {
+        .key = header.key,
+        .value = Vector<kj::StringPtr>(header.value.size())
+      };
+    });
+    entry.addAll(header.value);
   }
 
   return result;
@@ -655,6 +668,10 @@ constexpr bool fastCaseCmp(const char* actual);
 bool HttpHeaders::isWebSocket() const {
   return fastCaseCmp<'w', 'e', 'b', 's', 'o', 'c', 'k', 'e', 't'>(
       get(HttpHeaderId::UPGRADE).orDefault(nullptr).cStr());
+}
+
+kj::Maybe<const kj::Vector<kj::StringPtr>&> HttpHeaders::getUnindexed(kj::StringPtr id) const {
+  return unindexedHeaders.find(id);
 }
 
 void HttpHeaders::set(HttpHeaderId id, kj::StringPtr value) {
@@ -702,7 +719,13 @@ void HttpHeaders::addNoCheck(kj::StringPtr name, kj::StringPtr value) {
         // Uh-oh, Set-Cookie will be corrupted if we try to concatenate it. We'll make it an
         // unindexed header, which is weird, but the alternative is guaranteed corruption, so...
         // TODO(cleanup): Maybe HttpHeaders should just special-case set-cookie in general?
-        unindexedHeaders.add(Header {name, value});
+        auto& entry = unindexedHeaders.findOrCreate(name, [&]() {
+          return decltype(unindexedHeaders)::Entry {
+            .key = name,
+            .value = Vector<kj::StringPtr>()
+          };
+        });
+        entry.add(value);
       } else {
         auto concat = kj::str(indexedHeaders[id->id], ", ", value);
         indexedHeaders[id->id] = concat;
@@ -710,7 +733,13 @@ void HttpHeaders::addNoCheck(kj::StringPtr name, kj::StringPtr value) {
       }
     }
   } else {
-    unindexedHeaders.add(Header {name, value});
+    auto& entry = unindexedHeaders.findOrCreate(name, [&]() {
+      return decltype(unindexedHeaders)::Entry {
+        .key = name,
+        .value = Vector<kj::StringPtr>()
+      };
+    });
+    entry.add(value);
   }
 }
 
@@ -1016,8 +1045,10 @@ kj::String HttpHeaders::serialize(kj::ArrayPtr<const char> word1,
       size += table->idToString(HttpHeaderId(table, i)).size() + value.size() + 4;
     }
   }
-  for (auto& header: unindexedHeaders) {
-    size += header.name.size() + header.value.size() + 4;
+  for (const auto& header: unindexedHeaders) {
+    for (const auto& value: header.value) {
+      size += header.key.size() + value.size() + 4;
+    }
   }
 
   String result = heapString(size);
@@ -1032,8 +1063,10 @@ kj::String HttpHeaders::serialize(kj::ArrayPtr<const char> word1,
       ptr = kj::_::fill(ptr, table->idToString(HttpHeaderId(table, i)), colon, value, newline);
     }
   }
-  for (auto& header: unindexedHeaders) {
-    ptr = kj::_::fill(ptr, header.name, colon, header.value, newline);
+  for (const auto& header: unindexedHeaders) {
+    for (const auto& value: header.value) {
+      ptr = kj::_::fill(ptr, header.key, colon, value, newline);
+    }
   }
   ptr = kj::_::fill(ptr, newline);
 
