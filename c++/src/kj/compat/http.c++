@@ -3627,6 +3627,63 @@ public:
     connectionHeaders[HttpHeaders::BuiltinIndices::SEC_WEBSOCKET_VERSION] = "13";
     connectionHeaders[HttpHeaders::BuiltinIndices::SEC_WEBSOCKET_KEY] = keyBase64;
 
+    // Strip all extensions except for `permessage-deflate`.
+    kj::String extensionValues = kj::str("");
+    KJ_IF_MAYBE(value, headers.get(HttpHeaderId::SEC_WEBSOCKET_EXTENSIONS)) {
+      // Extension offers are separated by commas, so lets split by comma and drop every extension
+      // that doesn't begin with `permessage-deflate`.
+      auto extensions = kj::Vector<kj::String>{}; // Where we will store the remaining elements.
+
+      auto stripPrefixWhitespace = [&](StringPtr &input) -> size_t {
+        size_t count = 0;
+        while (input.begin() != input.end() && input[0] == ' ') {
+          input = input.begin() + 1;
+          count++;
+        }
+        return count;
+      };
+
+      // Temp will progress each time we find a ','.
+      StringPtr temp = *value;
+      size_t end = 0;
+
+      // Find each extension.
+      while (end < value->size()) {
+        auto maybeIndex = temp.findFirst(',');
+        KJ_IF_MAYBE(index, maybeIndex) {
+          // Found comma, lets add the substring to the vector.
+          String result = kj::str(temp.slice(0, *index));
+          if (result.startsWith("permessage-deflate")) {
+            extensions.add(kj::mv(result));
+          }
+
+          // Move our counters and temp string forward.
+          end += *index + 1;
+          // Temporary string moves to 1 past the comma.
+          temp = (temp.begin() + *index + 1);
+          // Strip whitespace between comma and next extension.
+          end += stripPrefixWhitespace(temp);
+        } else {
+          // Comma not found, lets just add whatever was left.
+          if (0 <= temp.size() && temp.startsWith("permessage-deflate")) {
+            extensions.add(kj::str(temp));
+          }
+          end += temp.size();
+        }
+      }
+      // Construct our final extensions string.
+      auto count = 0;
+      for (auto &ext : extensions) {
+        if (count == 0) {
+          extensionValues = kj::str(kj::mv(ext));
+        } else {
+          extensionValues = kj::str(extensionValues, ", ", kj::mv(ext));
+        }
+        count++;
+      }
+      connectionHeaders[HttpHeaders::BuiltinIndices::SEC_WEBSOCKET_EXTENSIONS] = extensionValues;
+    }
+
     httpOutput.writeHeaders(headers.serializeRequest(HttpMethod::GET, url, connectionHeaders));
 
     // No entity-body.
