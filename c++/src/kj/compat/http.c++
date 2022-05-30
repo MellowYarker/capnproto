@@ -1045,6 +1045,80 @@ kj::String HttpHeaders::toString() const {
   return serialize(nullptr, nullptr, nullptr, nullptr);
 }
 
+// TODO (now): Where should we put these 3 functions?
+// I've put them here for convenience, but this should only be temporary.
+// We should also write tests.
+void stripPrefixWhitespace(StringPtr& input) {
+  size_t count = 0;
+  while (input.begin() != input.end() && (input[0] == ' ' || input[0] == '\t')) {
+    input = input.begin() + 1;
+    count++;
+  }
+};
+
+inline kj::Maybe<StringPtr> advanceToNext(const StringPtr& input, const char& c,
+    kj::Maybe<size_t> advancedBy) {
+  // Given a string and character, return a StringPtr to the first non-whitespace character following
+  // the first instance of `char c`. The index of `char c` relative to `input` is stored
+  // in `advancedBy`.
+  kj::Maybe<StringPtr> result;
+  StringPtr temp = input;
+  advancedBy = temp.findFirst(c);
+  KJ_IF_MAYBE(index, advancedBy) {
+    // Move our counters and temp string forward.
+    // Temporary string moves to 1 past the comma.
+    temp = (temp.begin() + *index + 1);
+    // Strip whitespace between delimiter and next non-whitespace character.
+    // TODO (now): Can we use skipSpace() instead?
+    stripPrefixWhitespace(temp);
+    result = temp;
+  }
+  return result;
+}
+
+kj::Vector<kj::String> splitPartsWithCondition(kj::StringPtr& input, const char c,
+    kj::Maybe<StringPtr> condition = nullptr) {
+  // Given a string input and a delimiter `c`, split the string into a vector of substrings,
+  // separated by the delimiter.
+  //
+  // Optionally, the caller may pass a `condition` string, requesting that each substring starts
+  // with the value inside `condition`.
+  kj::Vector<kj::String> parts;
+
+  StringPtr temp = input;
+  // Temp will progress each time we find character c.
+
+  kj::Maybe<size_t> advanceCursor = nullptr;
+  // How many characters (if any) were between temp and the first instance of `char c`?
+
+  auto remainingParts = advanceToNext(temp, c, advanceCursor);
+  while (remainingParts != nullptr) {
+    auto part = kj::str(temp.slice(0, KJ_REQUIRE_NONNULL(advanceCursor)));
+    KJ_IF_MAYBE(prefix, condition) {
+      // If the caller passed a condition, we filter before adding to the vector.
+      if (part.startsWith(*prefix)) {
+        parts.add(kj::mv(part));
+      }
+    } else {
+      parts.add(kj::mv(part));
+    }
+    temp = KJ_REQUIRE_NONNULL(remainingParts).begin();
+    remainingParts = advanceToNext(temp, c, advanceCursor);
+  }
+  if (temp.size() != 0) {
+    // If we have no more instances of char c, lets just add whatever remains.
+    KJ_IF_MAYBE(prefix, condition) {
+      if (temp.startsWith(*prefix)) {
+        parts.add(kj::str(temp));
+      }
+    } else {
+      parts.add(kj::str(temp));
+    }
+  }
+
+  return parts;
+}
+
 // =======================================================================================
 
 namespace {
@@ -3627,59 +3701,21 @@ public:
     connectionHeaders[HttpHeaders::BuiltinIndices::SEC_WEBSOCKET_VERSION] = "13";
     connectionHeaders[HttpHeaders::BuiltinIndices::SEC_WEBSOCKET_KEY] = keyBase64;
 
-    // Strip all extensions except for `permessage-deflate`.
-    kj::String extensionValues = kj::str("");
+    kj::String extensionValues;
     KJ_IF_MAYBE(value, headers.get(HttpHeaderId::SEC_WEBSOCKET_EXTENSIONS)) {
-      // Extension offers are separated by commas, so lets split by comma and drop every extension
-      // that doesn't begin with `permessage-deflate`.
-      auto extensions = kj::Vector<kj::String>{}; // Where we will store the remaining elements.
+      // Strip all `Sec-WebSocket-Extensions` except for `permessage-deflate`.
+      kj::StringPtr permitedExtension = "permessage-deflate"_kj;
+      auto extensions = splitPartsWithCondition(*value, ',', permitedExtension);
 
-      auto stripPrefixWhitespace = [&](StringPtr &input) -> size_t {
-        size_t count = 0;
-        while (input.begin() != input.end() && input[0] == ' ') {
-          input = input.begin() + 1;
-          count++;
-        }
-        return count;
-      };
-
-      // Temp will progress each time we find a ','.
-      StringPtr temp = *value;
-      size_t end = 0;
-
-      // Find each extension.
-      while (end < value->size()) {
-        auto maybeIndex = temp.findFirst(',');
-        KJ_IF_MAYBE(index, maybeIndex) {
-          // Found comma, lets add the substring to the vector.
-          String result = kj::str(temp.slice(0, *index));
-          if (result.startsWith("permessage-deflate")) {
-            extensions.add(kj::mv(result));
-          }
-
-          // Move our counters and temp string forward.
-          end += *index + 1;
-          // Temporary string moves to 1 past the comma.
-          temp = (temp.begin() + *index + 1);
-          // Strip whitespace between comma and next extension.
-          end += stripPrefixWhitespace(temp);
-        } else {
-          // Comma not found, lets just add whatever was left.
-          if (0 <= temp.size() && temp.startsWith("permessage-deflate")) {
-            extensions.add(kj::str(temp));
-          }
-          end += temp.size();
-        }
-      }
       // Construct our final extensions string.
-      auto count = 0;
-      for (auto &ext : extensions) {
-        if (count == 0) {
-          extensionValues = kj::str(kj::mv(ext));
+      auto empty = true;
+      for (const auto &ext : extensions) {
+        if (empty) {
+          extensionValues = kj::str(ext);
+          empty = false;
         } else {
-          extensionValues = kj::str(extensionValues, ", ", kj::mv(ext));
+          extensionValues = kj::str(extensionValues, ", ", ext);
         }
-        count++;
       }
       connectionHeaders[HttpHeaders::BuiltinIndices::SEC_WEBSOCKET_EXTENSIONS] = extensionValues;
     }
@@ -5337,6 +5373,37 @@ private:
       key = kj::str(*k);
     } else {
       return sendWebSocketError("Missing Sec-WebSocket-Key");
+    }
+
+    KJ_IF_MAYBE(value, requestHeaders.get(HttpHeaderId::SEC_WEBSOCKET_EXTENSIONS)) {
+      kj::String acceptedExtension;
+
+      // TODO (now): It would be nice to use the splitPartsWithCondition() function here, but as the
+      // server, we only want to accept the first compatible extension we see, so it would likely be
+      // a waste of time if we split up all the offers first. I.e. we want to process in one pass,
+      // so we would need to modify `splitPartsWithCondition()` to take a function pointer.
+      // Temp will progress each time we find a ','.
+      StringPtr temp = *value;
+      kj::Maybe<size_t> advancedBy;
+      auto remainder = advanceToNext(temp, ',', advancedBy);
+      while (remainder != nullptr) {
+        // Save the extension, excluding comma that separates it.
+        auto result = kj::str(temp.slice(0, KJ_REQUIRE_NONNULL(advancedBy)));
+        if (result.startsWith("permessage-deflate")) {
+          // Save the parameters in `params`.
+          StringPtr resultPtr = result;
+          auto params = splitPartsWithCondition(resultPtr, ';');
+          // TODO (now): Check if we can accept this offer, then build `acceptedExtension`.
+        }
+        temp = KJ_REQUIRE_NONNULL(remainder).begin();
+        remainder = advanceToNext(temp, ',', advancedBy);
+      }
+      // No more instances of ',' so lets process the rest of the string.
+      if (temp.size() != 0 && temp.startsWith("permessage-deflate")) {
+        // Save the parameters in `params`.
+        auto params = splitPartsWithCondition(temp, ';');
+        // TODO (now): Check if we can accept this offer, then build `acceptedExtension`.
+      }
     }
 
     auto websocketAccept = generateWebSocketAccept(key);
