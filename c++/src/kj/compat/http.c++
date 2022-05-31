@@ -1057,7 +1057,7 @@ void stripPrefixWhitespace(StringPtr& input) {
 };
 
 inline kj::Maybe<StringPtr> advanceToNext(const StringPtr& input, const char& c,
-    kj::Maybe<size_t> advancedBy) {
+    kj::Maybe<size_t>& advancedBy) {
   // Given a string and character, return a StringPtr to the first non-whitespace character following
   // the first instance of `char c`. The index of `char c` relative to `input` is stored
   // in `advancedBy`.
