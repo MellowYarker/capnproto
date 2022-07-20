@@ -2186,10 +2186,12 @@ class WebSocketImpl final: public WebSocket {
 public:
   WebSocketImpl(kj::Own<kj::AsyncIoStream> stream,
                 kj::Maybe<EntropySource&> maskKeyGenerator,
+                kj::Maybe<CompressionParameters> compressionConfig = nullptr,
                 kj::Array<byte> buffer = kj::heapArray<byte>(4096),
                 kj::ArrayPtr<byte> leftover = nullptr,
                 kj::Maybe<kj::Promise<void>> waitBeforeSend = nullptr)
       : stream(kj::mv(stream)), maskKeyGenerator(maskKeyGenerator),
+        compressionConfig(kj::mv(compressionConfig)),
         sendingPong(kj::mv(waitBeforeSend)),
         recvBuffer(kj::mv(buffer)), recvData(leftover) {}
 
@@ -2613,6 +2615,7 @@ private:
 
   kj::Own<kj::AsyncIoStream> stream;
   kj::Maybe<EntropySource&> maskKeyGenerator;
+  kj::Maybe<CompressionParameters> compressionConfig;
 
   bool hasSentClose = false;
   bool disconnected = false;
@@ -2772,19 +2775,21 @@ private:
 
 kj::Own<WebSocket> upgradeToWebSocket(
     kj::Own<kj::AsyncIoStream> stream, HttpInputStreamImpl& httpInput, HttpOutputStream& httpOutput,
-    kj::Maybe<EntropySource&> maskKeyGenerator) {
+    kj::Maybe<EntropySource&> maskKeyGenerator,
+    kj::Maybe<CompressionParameters> compressionConfig = nullptr) {
   // Create a WebSocket upgraded from an HTTP stream.
   auto releasedBuffer = httpInput.releaseBuffer();
   return kj::heap<WebSocketImpl>(kj::mv(stream), maskKeyGenerator,
-                                 kj::mv(releasedBuffer.buffer), releasedBuffer.leftover,
-                                 httpOutput.flush());
+                                 kj::mv(compressionConfig), kj::mv(releasedBuffer.buffer),
+                                 releasedBuffer.leftover, httpOutput.flush());
 }
 
 }  // namespace
 
 kj::Own<WebSocket> newWebSocket(kj::Own<kj::AsyncIoStream> stream,
-                                kj::Maybe<EntropySource&> maskKeyGenerator) {
-  return kj::heap<WebSocketImpl>(kj::mv(stream), maskKeyGenerator);
+                                kj::Maybe<EntropySource&> maskKeyGenerator,
+                                kj::Maybe<CompressionParameters> compressionConfig) {
+  return kj::heap<WebSocketImpl>(kj::mv(stream), maskKeyGenerator, kj::mv(compressionConfig));
 }
 
 static kj::Promise<void> pumpWebSocketLoop(WebSocket& from, WebSocket& to) {
@@ -4128,7 +4133,8 @@ public:
               response.statusCode,
               response.statusText,
               &httpInput.getHeaders(),
-              upgradeToWebSocket(kj::mv(ownStream), httpInput, httpOutput, settings.entropySource),
+              upgradeToWebSocket(kj::mv(ownStream), httpInput, httpOutput, settings.entropySource,
+                  kj::mv(compressionParameters)),
             };
           } else {
             upgraded = false;
@@ -5761,7 +5767,7 @@ private:
     auto deferNoteClosed = kj::defer([this]() { webSocketClosed = true; });
     kj::Own<kj::AsyncIoStream> ownStream(&stream, kj::NullDisposer::instance);
     return upgradeToWebSocket(ownStream.attach(kj::mv(deferNoteClosed)),
-                              httpInput, httpOutput, nullptr);
+                              httpInput, httpOutput, nullptr, kj::mv(acceptedParameters));
   }
 
   kj::Promise<bool> sendError(HttpHeaders::ProtocolError protocolError) {
