@@ -2382,6 +2382,10 @@ public:
             tail[2] = 255;
             tail[3] = 255;
             // We have to append 0x00 0x00 0xFF 0xFF to the message before inflating.
+            if (config->inboundNoContextTakeover) {
+              // We must reset context on each message.
+              decompressor.reset();
+            }
             KJ_SWITCH_ONEOF(decompressor.processMessage(message)) {
               KJ_CASE_ONEOF(e, kj::Exception) {
                 // TODO(now): What should happen here? We failed to decompress...
@@ -2406,6 +2410,10 @@ public:
             tail[2] = 255;
             tail[3] = 255;
             // We have to append 0x00 0x00 0xFF 0xFF to the message before inflating.
+            if (config->inboundNoContextTakeover) {
+              // We must reset context on each message.
+              decompressor.reset();
+            }
             KJ_SWITCH_ONEOF(decompressor.processMessage(message)) {
               KJ_CASE_ONEOF(e, kj::Exception) {
                 // TODO(now): What should happen here? We failed to decompress...
@@ -2794,6 +2802,22 @@ private:
       return processLoop(output);
     }
 
+    bool reset() {
+      // Resets the (de)compression context. This should only be called when the (de)compressor uses
+      // client/server_no_context_takeover.
+      switch (mode) {
+        case Mode::COMPRESS:
+          return deflateReset(&ctx);
+          break;
+        case Mode::DECOMPRESS:
+          return inflateReset(&ctx);
+          break;
+        default:
+          KJ_UNREACHABLE;
+      }
+
+    }
+
   private:
     Mode mode;
     z_stream ctx = {};
@@ -2879,6 +2903,10 @@ private:
         useCompression = true;
         // Compress `message` according to `compressionConfig`s outbound parameters.
         auto& compressor = KJ_ASSERT_NONNULL(compressionContext);
+        if (config->outboundNoContextTakeover) {
+          // We must reset context on each message.
+          compressor.reset();
+        }
         KJ_SWITCH_ONEOF(compressor.processMessage(message)) {
           KJ_CASE_ONEOF(e, kj::Exception) {
             // TODO(now): What should happen here? We failed to compress...
